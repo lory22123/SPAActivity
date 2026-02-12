@@ -147,67 +147,135 @@ const RedPacketModal = ({ prizeName, onClose }) => (
 );
 
 // --- 3. 管理員端組件 ---
-const AdminView = ({ players, gameState, sortedPlayers, elapsedSeconds, appId, db, QUESTIONS }) => {
-  const [selectedWinner, setSelectedWinner] = useState(null);
+const AdminView = ({ players, gameState, sortedPlayers, elapsedSeconds, currentPhase }) => {
   const [isSpinning, setIsSpinning] = useState(false);
+  const [selectedWinner, setSelectedWinner] = useState(null);
 
-  // 1. 遊戲控制邏輯
   const startCountdown = async () => {
-    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'gameState'), {
-      isGameStarted: true, countdownStartTime: Date.now()
+    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'gameState'), { 
+      isGameStarted: true, countdownStartTime: Date.now(), phaseStartTime: Date.now() + 5000, currentQuestionIndex: 0, viewMode: 'question'
     }, { merge: true });
   };
 
   const nextStep = async () => {
     const nextIdx = gameState.currentQuestionIndex + 1;
-    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'gameState'), {
-      currentQuestionIndex: nextIdx,
-      viewMode: nextIdx >= QUESTIONS.length ? 'result' : 'question'
-    }, { merge: true });
+    if (nextIdx >= QUESTIONS.length) {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'gameState'), { viewMode: 'final' }, { merge: true });
+    } else {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'gameState'), { 
+        currentQuestionIndex: nextIdx, phaseStartTime: Date.now(), viewMode: 'question' 
+      }, { merge: true });
+    }
   };
 
-  // 2. 開獎邏輯 (對應妳要求的 1~3 名與抽獎)
-  const triggerAward = async (rank, winnerName = null) => {
-    const prizes = { 1: "馬上封神獎", 2: "馬尼多多獎", 3: "馬上有錢獎" };
-    const winner = winnerName || (sortedPlayers[rank - 1]?.name);
-    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'gameState'), {
-      awardStatus: { stage: 'opened', rank, winner, prize: prizes[rank] || "抽獎獎項" }
-    }, { merge: true });
+  const resetSystem = async () => {
+    if (!window.confirm("這將清除所有參賽者並重置遊戲。確定嗎？")) return;
+    const batch = writeBatch(db);
+    players.forEach(p => batch.delete(doc(db, 'artifacts', appId, 'public', 'data', 'players', p.id)));
+    batch.set(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'gameState'), { 
+      currentQuestionIndex: 0, isGameStarted: false, viewMode: 'question', countdownStartTime: 0, phaseStartTime: 0 
+    });
+    await batch.commit();
+    window.location.reload();
   };
+
+  const drawPrize = async () => {
+    if (!selectedWinner || isSpinning) return;
+    setIsSpinning(true);
+    setTimeout(async () => {
+      const prize = PRIZES_POOL[Math.floor(Math.random() * PRIZES_POOL.length)];
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'players', selectedWinner.id), { winningPrize: prize });
+      setIsSpinning(false);
+      setSelectedWinner(null);
+    }, 3000);
+  };
+
+  const getStats = (qIdx) => {
+    const stats = [0, 0, 0, 0];
+    players.forEach(p => {
+      const ans = p.answers?.[qIdx];
+      if (ans !== undefined && ans !== null) {
+        const val = Number(ans);
+        if (val >= 0 && val < 4) stats[val]++;
+      }
+    });
+    return stats;
+  };
+
+  const adminProgressText = useMemo(() => {
+    if (currentPhase === 'question') return `作答中: ${Math.max(0, 10 - Math.floor(elapsedSeconds))} 秒`;
+    if (currentPhase === 'buffer') return `緩衝等待: ${Math.max(0, 12 - Math.floor(elapsedSeconds))} 秒`;
+    if (currentPhase === 'reveal') return `公布答案: ${Math.max(0, 15 - Math.floor(elapsedSeconds))} 秒`;
+    if (currentPhase === 'rank') return "戰報顯示中";
+    if (currentPhase === 'countdown_lobby') return "倒數準備中";
+    return "尚未啟動";
+  }, [currentPhase, elapsedSeconds]);
 
   return (
-    <div className="flex flex-col h-screen bg-slate-900 text-white overflow-hidden">
-      {/* 置頂控制區 (不會隨頁面捲動) */}
-      <div className="flex-none bg-slate-800 p-4 border-b-2 border-yellow-500 shadow-2xl z-50">
-        <h2 className="text-xl font-bold text-yellow-500 mb-4 italic">2026 春酒主控台</h2>
-        <div className="space-y-3">
-          {!gameState.isGameStarted ? (
-            <button onClick={startCountdown} className="w-full bg-green-600 p-4 rounded-2xl font-bold">🚀 開始 5 秒倒數</button>
-          ) : (
-            <button onClick={nextStep} className="w-full bg-blue-600 p-4 rounded-2xl font-bold">➡️ 下一題 / 結算</button>
-          )}
-          {/* 獎項按鈕區 */}
-          <div className="grid grid-cols-4 gap-2 pt-2">
-            <button onClick={() => triggerAward(1)} className="bg-yellow-600 p-2 rounded text-[10px] font-bold">馬上<br/>封神</button>
-            <button onClick={() => triggerAward(2)} className="bg-gray-400 p-2 rounded text-[10px] font-bold text-black">馬尼<br/>多多</button>
-            <button onClick={() => triggerAward(3)} className="bg-orange-700 p-2 rounded text-[10px] font-bold">馬上<br/>有錢</button>
-            <button onClick={() => alert('請在下方名單選擇抽獎人')} className="bg-purple-600 p-2 rounded text-[10px] font-bold">4-7名<br/>抽獎</button>
-          </div>
+    <div className="flex flex-col h-full p-4 space-y-6 overflow-y-auto no-scrollbar pb-24 text-white">
+      <div className="bg-white/10 rounded-3xl p-6 border-2 border-yellow-500/30">
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-xl font-bold text-yellow-400 italic font-serif-tc">主控台</h2>
+          <button onClick={resetSystem} className="text-red-400 text-xs font-bold border border-red-400/30 px-3 py-1 rounded-lg"><Trash2 className="w-3 h-3 inline mr-1"/>重置</button>
         </div>
+        {!gameState.isGameStarted ? (
+          <button onClick={startCountdown} className="w-full bg-green-600 p-5 rounded-2xl font-black text-xl shadow-lg">啟動大賽 (5s 倒數)</button>
+        ) : (
+          <>
+            <div className="mb-4 bg-black/40 p-3 rounded-xl border border-white/10 flex justify-between items-center">
+               <span className="text-xs font-bold text-white/50 uppercase tracking-widest"><Clock className="w-3 h-3 inline mr-1"/>目前狀態</span>
+               <span className="text-yellow-400 font-black">{adminProgressText}</span>
+            </div>
+            <button onClick={nextStep} className="w-full bg-blue-600 p-5 rounded-2xl font-black text-xl flex items-center justify-center gap-2"><SkipForward className="w-6 h-6" />下一題 / 結算</button>
+          </>
+        )}
       </div>
 
-      {/* 下方數據捲動區 */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-6">
-        <div className="bg-white/10 rounded-3xl p-6 border border-white/20">
-          <h3 className="text-sm font-bold text-yellow-400 mb-4">🏆 即時排行 (由高至低)</h3>
-          <div className="space-y-3">
-            {sortedPlayers.map((p, i) => (
-              <div key={p.id} onClick={() => setSelectedWinner(p)} className={`flex justify-between items-center p-4 rounded-2xl border ${selectedWinner?.id === p.id ? 'border-yellow-500 bg-yellow-500/20' : 'border-white/10 bg-black/40'}`}>
-                <span>{i + 1}. {p.name}</span>
-                <span className="text-yellow-400 font-black">{p.score} pt</span>
+      <div className="bg-white/10 rounded-3xl p-6 border border-white/10">
+         <h3 className="text-sm font-bold text-yellow-400 mb-4 uppercase italic">即時戰報</h3>
+         <div className="space-y-2">
+            {sortedPlayers.slice(0, 5).map((p, i) => (
+              <div key={p.id} className="flex justify-between items-center bg-black/20 p-3 rounded-xl">
+                <span>{i+1}. {p.name}</span>
+                <span className="text-yellow-400 font-bold">{p.score} pt / {p.totalTimeTaken?.toFixed(1)}s</span>
               </div>
             ))}
-          </div>
+         </div>
+      </div>
+
+      <div className="bg-white/10 rounded-3xl p-6 border border-white/10 space-y-6">
+        <h3 className="text-sm font-bold text-yellow-400 uppercase italic flex items-center gap-2"><PieChart className="w-4 h-4"/>各題答題比例</h3>
+        {QUESTIONS.map((q, idx) => {
+            const stats = getStats(idx);
+            const total = stats.reduce((a,b) => a+b, 0);
+            return (
+                <div key={idx} className={`p-4 rounded-xl border ${gameState.currentQuestionIndex === idx ? 'bg-yellow-400/10 border-yellow-400' : 'bg-black/20 border-white/5 opacity-60'}`}>
+                    <p className="text-white text-xs font-bold mb-2">Q{idx+1}: {q.q}</p>
+                    <div className="space-y-2">
+                        {q.a.map((ans, aIdx) => (
+                            <div key={aIdx} className="space-y-1 text-[9px]">
+                                <div className="flex justify-between text-white/70"><span>{String.fromCharCode(65+aIdx)}. {ans.replace(/\n/g, ' ')}</span><span>{stats[aIdx]}人</span></div>
+                                <div className="h-1 bg-black/40 rounded-full overflow-hidden"><div className="h-full bg-yellow-500" style={{ width: `${total > 0 ? (stats[aIdx]/total*100) : 0}%` }} /></div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        })}
+      </div>
+
+      <div className="bg-white/10 rounded-3xl p-6 border-2 border-yellow-500/30 text-center relative">
+        <h2 className="text-xl font-bold text-yellow-400 mb-6 italic">抽獎轉盤</h2>
+        <div className="relative w-32 h-32 mx-auto mb-6">
+          <div className={`w-full h-full rounded-full border-4 border-yellow-500 transition-all duration-[3000ms] ${isSpinning ? 'rotate-[1080deg]' : 'rotate-0'}`} style={{ background: 'conic-gradient(#8b0000 0% 25%, #d4af37 25% 50%, #8b0000 50% 75%, #d4af37 75% 100%)' }}></div>
+          <Crown className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white w-8 h-8" />
+        </div>
+        <p className="mb-4 font-bold text-white/80 h-6 text-sm">{selectedWinner ? `選中：${selectedWinner.name}` : "請選取成員"}</p>
+        <button disabled={!selectedWinner || isSpinning} onClick={drawPrize} className="w-full py-4 bg-yellow-500 text-red-950 font-black rounded-2xl disabled:opacity-30">撥動開獎</button>
+        <div className="grid grid-cols-3 gap-2 mt-4 max-h-40 overflow-y-auto no-scrollbar">
+            {sortedPlayers.map(p => (
+                <button key={p.id} onClick={() => setSelectedWinner(p)} className={`p-2 rounded-lg text-[10px] font-bold border truncate ${selectedWinner?.id === p.id ? 'bg-yellow-400 text-red-950 border-yellow-400' : 'bg-black/40 border-white/10'}`}>{p.name}</button>
+            ))}
         </div>
       </div>
     </div>
